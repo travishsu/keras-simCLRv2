@@ -102,7 +102,7 @@ RUN wget https://raw.githubusercontent.com/tensorflow/tensorflow/r1.13/tensorflo
 RUN wget https://raw.githubusercontent.com/tensorflow/tensorflow/r1.13/tensorflow/tools/docker/jupyter_notebook_config.py --no-check-certificate
 RUN mkdir /root/.jupyter && mv jupyter_notebook_config.py /root/.jupyter/
 RUN chmod +x /run_jupyter.sh && \
-    sed -i -e 's/notebook/lab\ --NotebookApp.notebook_dir=\/sdi_mrcnn/g' /run_jupyter.sh && \
+    sed -i -e 's/notebook/lab\ --NotebookApp.notebook_dir=\//g' /run_jupyter.sh && \
     printf '#!/bin/bash\njupyter nbconvert --ExecutePreprocessor.timeout=None --allow-errors --to html --execute $1' > /sbin/ipyrun && \
     chmod +x /sbin/ipyrun && \
     { printf 'alias smi="nvidia-smi"\nalias wsmi="watch -n 1 nvidia-smi"\n'; cat /etc/bash.bashrc; } >/etc/bash.bashrc.new && \
