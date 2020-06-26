@@ -96,6 +96,9 @@ RUN cat /etc/ssh/ssh_config | grep -v StrictHostKeyChecking > /etc/ssh/ssh_confi
     echo "    StrictHostKeyChecking no" >> /etc/ssh/ssh_config.new && \
     mv /etc/ssh/ssh_config.new /etc/ssh/ssh_config
 
+# Install Mask RCNN dependencies
+RUN /usr/bin/pip install $TRUSTED_HOST_ARGS scikit-image numba imgaug==0.4.0
+
 # Install jupyterlab
 RUN /usr/bin/pip install $TRUSTED_HOST_ARGS jupyterlab
 RUN wget https://raw.githubusercontent.com/tensorflow/tensorflow/r1.13/tensorflow/tools/docker/run_jupyter.sh --no-check-certificate
