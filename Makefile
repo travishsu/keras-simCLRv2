@@ -38,7 +38,7 @@ jupyterlab-gpus:
                /run_jupyter.sh --allow-root
 
 bash:
-    docker run -it --shm-size=1g --ulimit memlock=-1 --rm \
+	docker run -it --shm-size=1g --ulimit memlock=-1 --rm \
                -v $(shell pwd):/workspace/ $(DOCKER_IMAGE) \
                bash
 

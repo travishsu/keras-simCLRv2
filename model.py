@@ -1,6 +1,6 @@
 import numpy as np
 
-import tensorflow.keras as keras
+import tensorflow as tf
 import tensorflow.keras.backend as K
 import tensorflow.keras.layers as KL
 import tensorflow.keras.models as KM
@@ -169,7 +169,7 @@ class DataGenerator(KU.Sequence):
             np.random.shuffle(self.image_ids)
 
     def __len__(self):
-        return int(np.ceil(len(self.image_ids) / float(self.batch_size)))
+        return int(np.ceil(len(self.image_ids) / float(self.batch_size))) - 1
 
     def __getitem__(self, idx):
         return self.data_generator(
@@ -187,11 +187,11 @@ class DataGenerator(KU.Sequence):
                     (2*self.batch_size,) + paired_images.shape[1:],
                     dtype=np.float32)
                 batch_labels = np.zeros(
-                    (2*self.batch_size, 1)
+                    (2*self.batch_size)
                 )
 
             batch_images[2*b:2*b+2] = paired_images
-            batch_labels[2*b:2*b+2] = np.array([[2*b+1], [2*b]])
+            batch_labels[2*b:2*b+2] = np.array([2*b+1, 2*b])
             b += 1
 
             if b >= self.batch_size:
@@ -204,10 +204,23 @@ class DataGenerator(KU.Sequence):
             np.random.shuffle(self.image_ids)
 
 
+class CosineSimilarity(Layer):
+    def __init__(self, batch_size):
+        super(CosineSimilarity, self).__init__()
+        large_num = 1e9
+        self.mask = -large_num*tf.eye(2*batch_size)
+
+    def call(self, z):
+        z = tf.math.l2_normalize(z, axis=1)
+        z = K.dot(z, K.transpose(z))
+        z = z + self.mask
+        return z
+
+
 class SimCLRv2(object):
     def __init__(self, config):
         self.config = config
-        pass
+        self.build()
 
     def build(self):
         config = self.config
@@ -215,18 +228,33 @@ class SimCLRv2(object):
         # Inputs
         input_image = KL.Input(
             shape=[None, None, 3], name="input_image")
-        input_label = KL.Input(shape=[1])
 
         # Build Resnet
         _, C2, C3, C4, C5 = resnet_graph(input_image, config.BACKBONE,
                                          stage5=True, train_bn=config.TRAIN_BN)
-        pass
+
+        z2 = KL.GlobalAveragePooling2D()(C2)
+        z3 = KL.GlobalAveragePooling2D()(C3)
+        z4 = KL.GlobalAveragePooling2D()(C4)
+        z5 = KL.GlobalAveragePooling2D()(C5)
+
+        z = KL.Concatenate(axis=-1)([z2, z3, z4, z5])
+
+        logits = CosineSimilarity(config.BATCH_SIZE)(z)
+        probs = KL.Activation('softmax')(logits)
+        self.model = KM.Model(input_image, probs)
 
     def compile(self):
-        pass
+        self.model.compile(
+            optimizer="Adam",
+            loss='sparse_categorical_crossentropy',
+        )
 
     def save_h5(self):
         pass
 
-    def train(self):
-        pass
+    def train(self, dataset, augmentation):
+        train_generator = DataGenerator(
+            dataset, self.config, augmentation=augmentation
+            )
+        self.model.fit(train_generator)
