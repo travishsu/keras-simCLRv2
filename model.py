@@ -1,4 +1,8 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
+
 import numpy as np
+import re
 
 import tensorflow as tf
 import tensorflow.keras.backend as K
@@ -7,8 +11,15 @@ import tensorflow.keras.models as KM
 import tensorflow.keras.utils as KU
 from tensorflow.keras.layers import Layer
 
+import tensorflow_addons as tfa
 
-class BatchNorm(KL.BatchNormalization):
+gpus = tf.config.experimental.list_physical_devices('GPU')
+for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+
+
+# class BatchNorm(KL.BatchNormalization):
+class BatchNorm(tfa.layers.GroupNormalization):
     """Extends the Keras BatchNormalization class to allow a central place
     to make changes if needed.
 
@@ -23,7 +34,8 @@ class BatchNorm(KL.BatchNormalization):
             False: Freeze BN layers. Good when batch size is small
             True: (don't use). Set layer in training mode even when making inferences
         """
-        return super(self.__class__, self).call(inputs, training=training)
+        # return super(self.__class__, self).call(inputs, training=training)
+        return super(self.__class__, self).call(inputs)
 
 
 ############################################################
@@ -61,7 +73,7 @@ def identity_block(input_tensor, kernel_size, filters, stage, block,
 
     x = KL.Conv2D(nb_filter3, (1, 1), name=conv_name_base + '2c',
                   use_bias=use_bias)(x)
-    x = BatchNorm(name=bn_name_base + '2c')(x, training=train_bn)
+    x = BatchNorm(gamma_initializer='zeros', name=bn_name_base + '2c')(x, training=train_bn)
 
     x = KL.Add()([x, input_tensor])
     x = KL.Activation('relu', name='res' + str(stage) + block + '_out')(x)
@@ -102,7 +114,7 @@ def conv_block(input_tensor, kernel_size, filters, stage, block,
 
     shortcut = KL.Conv2D(nb_filter3, (1, 1), strides=strides,
                          name=conv_name_base + '1', use_bias=use_bias)(input_tensor)
-    shortcut = BatchNorm(name=bn_name_base + '1')(shortcut, training=train_bn)
+    shortcut = BatchNorm(gamma_initializer='zeros', name=bn_name_base + '1')(shortcut, training=train_bn)
 
     x = KL.Add()([x, shortcut])
     x = KL.Activation('relu', name='res' + str(stage) + block + '_out')(x)
@@ -151,7 +163,7 @@ def load_image_gt(dataset, image_id, augmentation=None):
     image = dataset.load_image(image_id)
     images = np.array([image, image])
     if augmentation:
-        images = augmentation(images=images)
+        images = np.array(augmentation(images=images))
     return images
 
 
@@ -190,7 +202,7 @@ class DataGenerator(KU.Sequence):
                     (2*self.batch_size)
                 )
 
-            batch_images[2*b:2*b+2] = paired_images
+            batch_images[2*b:2*b+2] = mold_image(paired_images, self.config)
             batch_labels[2*b:2*b+2] = np.array([2*b+1, 2*b])
             b += 1
 
@@ -204,25 +216,74 @@ class DataGenerator(KU.Sequence):
             np.random.shuffle(self.image_ids)
 
 
+class OnEpochEnd(tf.keras.callbacks.Callback):
+    """Workaround to deal with bug in Tensorflow 2.1.0
+
+    "tf.keras.fit not calling Sequence.on_epoch_end" refer 
+    to tenstflow/issues/#35911
+    """
+    def __init__(self, callbacks):
+        self.callbacks = callbacks
+
+    def on_epoch_end(self, epoch, logs=None):
+        for callback in self.callbacks:
+            callback()
+
+
+# TODO: Momentum weight
+class MoCoQueue(Layer):
+    """This layer provides queue mechanism to save intput as previous projection results,
+    and return current the whole queue as negative sample in each iteration.
+    """
+    def __init__(self, config):
+        super(MoCoQueue, self).__init__()
+        self.batch_size = config.BATCH_SIZE
+        self.max_queue_length = config.MAX_QUEUE_LENGTH
+        self.c = (self.max_queue_length+2*self.batch_size) // (2*self.batch_size)
+
+    def build(self, input_shape):
+        self.embedding_dim = input_shape[-1]
+        init = tf.random_normal_initializer()
+        self.keys = tf.Variable(
+            initial_value=init(shape=(self.max_queue_length, self.embedding_dim), dtype='float32'),
+            trainable=False)
+    
+    def call(self, new_keys):
+        keys = self.keys
+        cat = tf.concat([new_keys, self.keys], 0)
+        self.keys.assign(
+            tf.slice(cat, [0, 0], [self.max_queue_length, self.embedding_dim],))
+        return keys
+
+
 class CosineSimilarity(Layer):
-    def __init__(self, batch_size):
+    """Compute in-batch similarity and similarities between current batch and MoCo queue.
+    """
+    def __init__(self, config):
         super(CosineSimilarity, self).__init__()
         large_num = 1e9
-        self.mask = -large_num*tf.eye(2*batch_size)
+        self.temperature = config.TEMPERATURE
 
-    def call(self, z):
-        z = tf.math.l2_normalize(z, axis=1)
-        z = K.dot(z, K.transpose(z))
-        z = z + self.mask
+        self.batch_size = config.BATCH_SIZE
+        self.max_queue_length = config.MAX_QUEUE_LENGTH
+        self.c = (self.max_queue_length) // (2*self.batch_size)
+
+        self.mask = large_num*tf.eye(2*self.batch_size)
+
+    def call(self, z, moco):
+        z_moco = K.dot(z, K.transpose(moco))  / self.temperature
+        z = K.dot(z, K.transpose(z))  / self.temperature
+        z = z - self.mask
+        z = tf.concat([z, z_moco], axis=-1)
         return z
 
 
 class SimCLRv2(object):
     def __init__(self, config):
         self.config = config
-        self.build()
+        self.build(mode=self.config.MODE)
 
-    def build(self):
+    def build(self, mode='training'):
         config = self.config
 
         # Inputs
@@ -240,21 +301,124 @@ class SimCLRv2(object):
 
         z = KL.Concatenate(axis=-1)([z2, z3, z4, z5])
 
-        logits = CosineSimilarity(config.BATCH_SIZE)(z)
-        probs = KL.Activation('softmax')(logits)
-        self.model = KM.Model(input_image, probs)
+        z = BatchNorm(name='projection_bn')(z)
 
-    def compile(self):
+        z = KL.Dense(config.NUM_HIDDENS[0], name='projection1')(z)
+        z = KL.Activation('relu')(z)
+        z = KL.Dense(config.NUM_HIDDENS[1], name='projection2')(z)
+        z = KL.Activation('relu')(z)
+        z = KL.Dense(config.NUM_HIDDENS[2], name='projection3')(z)
+
+        z = KL.Lambda(lambda x: tf.math.l2_normalize(x, axis=1))(z)
+
+        if mode == 'training':
+            keys = MoCoQueue(config)(  z)
+            logits = CosineSimilarity(config)(z, keys)
+            probs = KL.Activation('softmax')(logits)
+            output = probs
+        else:
+            output = z
+        self.model = KM.Model(input_image, output)
+
+    def load_h5(self, path):
+        self.model.load_weights(path, by_name=True)
+
+    def save_h5(self, path):
+        self.model.save_weights(path)
+
+    def compile(self, learning_rate, lookahead=True):
+        config = self.config
+        # Optimizer object
+        if config.OPTIMIZER == "SGD+Momentum":
+            optimizer = tf.keras.optimizers.SGD(
+                lr=learning_rate, momentum=momentum)
+        elif config.OPTIMIZER == "AdamW":
+            optimizer = tfa.optimizers.AdamW(learning_rate=learning_rate, weight_decay=1e-8)
+        elif config.OPTIMIZER == "Ranger":
+            optimizer = tfa.optimizers.RectifiedAdam(lr=learning_rate)
+        else:
+            raise ValueError("Your config.OPTIMIZER is not given or not supported in this repo.")
+
+        if config.LOOKAHEAD:
+            optimizer = tfa.optimizers.Lookahead(optimizer)
+
         self.model.compile(
-            optimizer="Adam",
+            optimizer=optimizer,
             loss='sparse_categorical_crossentropy',
         )
 
-    def save_h5(self):
-        pass
+    def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
+        """Sets model layers as trainable if their names match
+        the given regular expression.
+        """
+        # Print message on the first call (but not on recursive calls)
+        if verbose > 0 and keras_model is None:
+            print("Selecting layers to train")
 
-    def train(self, dataset, augmentation):
+        keras_model = keras_model or self.keras_model
+
+        # In multi-GPU training, we wrap the model. Get layers
+        # of the inner model because they have the weights.
+        layers = keras_model.inner_model.layers if hasattr(keras_model, "inner_model")\
+            else keras_model.layers
+
+        for layer in layers:
+            # Is the layer a model?
+            if layer.__class__.__name__ == 'Model':
+                print("In model: ", layer.name)
+                self.set_trainable(
+                    layer_regex, keras_model=layer, indent=indent + 4)
+                continue
+
+            if not layer.weights:
+                continue
+            # Is it trainable?
+            trainable = bool(re.fullmatch(layer_regex, layer.name))
+            # Update layer. If layer is a container, update inner layer.
+            if layer.__class__.__name__ == 'TimeDistributed':
+                layer.layer.trainable = trainable
+            else:
+                layer.trainable = trainable
+            # Print trainable layer names
+            if trainable and verbose > 0:
+                print("{}{:20}   ({})".format(" " * indent, layer.name,
+                                            layer.__class__.__name__))
+
+    def train(self, dataset, augmentation, epochs=1, learning_rate=1e-2, layers='all'):
+
+        # Pre-defined layer regular expressions
+        layer_regex = {
+            # From a specific Resnet stage and up
+            "3+": r"(res3.*)|(bn3.*)|(res4.*)|(bn4.*)|(res5.*)|(bn5.*)",
+            "4+": r"(res4.*)|(bn4.*)|(res5.*)|(bn5.*)",
+            "5+": r"(res5.*)|(bn5.*))",
+            "resnet": r"(res.*)|(bn.*)",
+            "projection": r"(projection_.*)",
+            # All layers
+            "all": ".*",
+        }
+        if layers in layer_regex.keys():
+            layers = layer_regex[layers]
+
         train_generator = DataGenerator(
             dataset, self.config, augmentation=augmentation
             )
-        self.model.fit(train_generator)
+        callbacks = [
+            OnEpochEnd([train_generator.on_epoch_end]),
+            ]
+        self.set_trainable(layers, keras_model=self.model, verbose=0)
+        self.compile(learning_rate=learning_rate)
+        self.model.fit(
+            train_generator,
+            epochs=epochs,
+            use_multiprocessing=True,
+            callbacks=callbacks,
+            )
+
+
+def mold_image(images, config):
+    """Expects an RGB image (or array of images) and subtracts
+    the mean pixel and converts it to float. Expects image
+    colors in RGB order.
+    """
+    return images.astype(np.float32) - config.MEAN_PIXEL
