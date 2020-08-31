@@ -4,7 +4,8 @@ FROM nvidia/cuda:10.1-devel-ubuntu18.04
 # RUN echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf
 
 # TensorFlow version is tightly coupled to CUDA and cuDNN so it should be selected carefully
-ENV TENSORFLOW_VERSION=2.1.0
+ENV TENSORFLOW_VERSION=2.3.0
+ENV TENSORFLOW_ADDONS_VERSION=0.11.1
 ENV CUDNN_VERSION=7.6.4.38-1+cuda10.1
 ENV NCCL_VERSION=2.5.6-1+cuda10.1
 
@@ -60,7 +61,7 @@ RUN ln -s /usr/local/bin/pip3.6 /usr/bin/pip
 # Install TensorFlow, Keras, PyTorch and MXNet
 RUN pip install $TRUSTED_HOST_ARGS  future typing
 RUN pip install $TRUSTED_HOST_ARGS  numpy==1.18 \
-        tensorflow-addons==0.9.1 \
+        tensorflow-addons==${TENSORFLOW_ADDONS_VERSION} \
         tensorflow-gpu==${TENSORFLOW_VERSION} \
         tensorflow-probability \ 
         keras \
@@ -117,3 +118,5 @@ RUN chmod +x /run_jupyter.sh && \
 
 # Install Tensorboard
 RUN /usr/bin/pip install $TRUSTED_HOST_ARGS tensorboard
+
+WORKDIR /workspace
