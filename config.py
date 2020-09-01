@@ -11,6 +11,7 @@ class Config(object):
 
     BACKBONE = 'resnet101'
     TRAIN_BN = True
+    WEIGHT_DECAY = 1e-4
 
     # Projection Layers
     NUM_HIDDENS = [256, 128, 50]

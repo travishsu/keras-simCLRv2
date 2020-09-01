@@ -294,12 +294,7 @@ class SimCLRv2(object):
         _, C2, C3, C4, C5 = resnet_graph(input_image, config.BACKBONE,
                                          stage5=True, train_bn=config.TRAIN_BN)
 
-        z2 = KL.GlobalAveragePooling2D()(C2)
-        z3 = KL.GlobalAveragePooling2D()(C3)
-        z4 = KL.GlobalAveragePooling2D()(C4)
-        z5 = KL.GlobalAveragePooling2D()(C5)
-
-        z = KL.Concatenate(axis=-1)([z2, z3, z4, z5])
+        z = KL.GlobalAveragePooling2D()(C5)
 
         z = BatchNorm(name='projection_bn')(z)
 
@@ -342,10 +337,17 @@ class SimCLRv2(object):
         if config.LOOKAHEAD:
             optimizer = tfa.optimizers.Lookahead(optimizer)
 
+        # Add L2 Regularization
+        # Skip gamma and beta weights of batch normalization layers.
+        reg_losses = [
+            keras.regularizers.l2(config.WEIGHT_DECAY)(w) / tf.cast(tf.size(w), tf.float32)
+            for w in self.model.trainable_weights
+            if 'gamma' not in w.name and 'beta' not in w.name]
+        self.model.add_loss(tf.add_n(reg_losses))
+
         self.model.compile(
             optimizer=optimizer,
-            loss='sparse_categorical_crossentropy',
-        )
+            loss='sparse_categorical_crossentropy')
 
     def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
         """Sets model layers as trainable if their names match
